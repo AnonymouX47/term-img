@@ -9,6 +9,7 @@ __all__ = (
     "TTY",
     "active_terminal_sync",
     "get_active_terminal",
+    "NoActiveTerminalError",
     "NoMultiProcessSyncWarning",
 )
 
@@ -23,7 +24,7 @@ from warnings import warn
 
 from typing_extensions import ClassVar, ParamSpec, TypeVar
 
-from .exceptions import TermImageUserWarning
+from .exceptions import TermImageError, TermImageUserWarning
 from .utils import arg_value_error_msg, no_redecorate
 
 OS_IS_UNIX: bool
@@ -46,6 +47,10 @@ T = TypeVar("T")
 
 # Exceptions
 # ======================================================================================
+
+
+class NoActiveTerminalError(TermImageError):
+    """Raised when there is no :term:`active terminal`."""
 
 
 class NoMultiProcessSyncWarning(TermImageUserWarning):
@@ -80,7 +85,9 @@ def active_terminal_sync(func: Callable[P, T]) -> Callable[P, T]:
 
     @wraps(func)
     def active_terminal_access_wrapper(*args: P.args, **kwargs: P.kwargs) -> T:
-        if not (tty := get_active_terminal()):
+        try:
+            tty = get_active_terminal()
+        except NoActiveTerminalError:
             return func(*args, **kwargs)
 
         # If a thread reaches this point while the lock is being changed
@@ -147,15 +154,16 @@ class ActiveTerminalSyncProcess(Process):
             NoMultiProcessSyncWarning: :py:mod:`multiprocessing.synchronize` is not
               supported on the host platform.
         """
+        try:
+            tty = get_active_terminal()
+        except NoActiveTerminalError:
+            return super().start()
+
         # Ensures the lock is not acquired by another thread before changing it.
         # The only case in which this is useless is when the owner thread is the one
         # starting the process. In such a situation, the owner thread will be partially
         # (may acquire the new lock in a nested call while still holding the old lock)
         # out of sync until it has fully released the old lock.
-
-        if not (tty := get_active_terminal()):
-            return super().start()
-
         with tty.lock:
             self._tty_name = tty.name
 
@@ -240,23 +248,30 @@ class TTY(FileIO):
 # ======================================================================================
 
 
-def get_active_terminal() -> TTY | None:
+def get_active_terminal() -> TTY:
     """Determines the :term:`active terminal`.
 
     Returns:
-        - the :py:class:`TTY` instance associated with the :term:`active terminal`, OR
-        - ``None``, on non-unix-like platforms or when there is no
-          :term:`active terminal`.
+        The :py:class:`TTY` instance associated with the active terminal.
+
+    Raises:
+        NoActiveTerminalError: On non-unix-like platforms or when the process does
+          not seem to be connected to a TTY[-like] device.
     """
     global _tty, _tty_determined
 
-    if _tty_determined:
+    if _tty:
         return _tty
 
-    _tty_determined = True
-
     if not OS_IS_UNIX:
-        return None
+        raise NoActiveTerminalError("Not supported on this platform")
+
+    if _tty_determined:
+        raise NoActiveTerminalError(
+            "This process does not seem to be connected to a TTY[-like] device"
+        )
+
+    _tty_determined = True
 
     for stream in ("out", "in", "err"):  # In order of priority
         try:
@@ -272,7 +287,9 @@ def get_active_terminal() -> TTY | None:
     try:
         _tty = TTY(tty_name)
     except OSError:
-        return None
+        raise NoActiveTerminalError(
+            "This process does not seem to be connected to a TTY[-like] device"
+        ) from None
 
     return _tty
 
