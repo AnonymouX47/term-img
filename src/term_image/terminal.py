@@ -20,18 +20,19 @@ from functools import wraps
 from io import FileIO
 from multiprocessing import Process, RLock as mp_RLock
 from threading import RLock
+from time import monotonic
 from warnings import warn
 
-from typing_extensions import ClassVar, ParamSpec, TypeVar
+from typing_extensions import ClassVar, ParamSpec, TypeVar, overload
 
 from .exceptions import TermImageError, TermImageUserWarning
-from .utils import arg_value_error_msg, no_redecorate
+from .utils import arg_value_error_msg, arg_value_error_range, no_redecorate
 
 OS_IS_UNIX: bool
 try:
     import fcntl  # noqa: F401
-    import termios  # noqa: F401
-    from select import select  # noqa: F401
+    import termios
+    from select import select
 except ImportError:
     OS_IS_UNIX = False
 else:
@@ -242,6 +243,262 @@ class TTY(FileIO):
     def __del__(self) -> None:
         del self.lock
         super().__del__()
+
+    def read_available(self) -> bytes:
+        """Reads all **available** bytes without blocking.
+
+        Returns:
+            The bytes read (empty, if no bytes were readily available).
+        """
+        return self.read_raw()
+
+    @overload
+    def read_raw(
+        self,
+        timeout: int | float | None = ...,
+        minimum: int = ...,
+        maximum: int | None = ...,
+        no_more: Callable[[bytearray, int, int], bool] = ...,
+        buffer: None = ...,
+        buffer_offset: int = ...,
+        *,
+        echo: bool = ...,
+    ) -> bytes: ...
+
+    @overload
+    def read_raw(
+        self,
+        timeout: int | float | None = ...,
+        minimum: int = ...,
+        maximum: int | None = ...,
+        no_more: Callable[[bytearray, int, int], bool] = ...,
+        buffer: bytearray = ...,
+        buffer_offset: int = ...,
+        *,
+        echo: bool = ...,
+    ) -> int: ...
+
+    def read_raw(
+        self,
+        timeout: int | float | None = None,
+        minimum: int = 0,
+        maximum: int | None = None,
+        no_more: Callable[[bytearray, int, int], bool] = lambda *_: False,
+        buffer: bytearray | None = None,
+        buffer_offset: int = 0,
+        *,
+        echo: bool = False,
+    ) -> bytes | int:
+        """
+        read_raw(\
+            timeout = None,\
+            minimum = 0,\
+            maximum = None,\
+            no_more = lambda *_: False,\
+            buffer = None,\
+            buffer_offset = 0,\
+            *,\
+            echo = False,\
+        ) ->
+        read_raw(..., buffer: None, ...) -> bytes
+        read_raw(..., buffer: bytearray, ...,) -> int
+
+        Reads from the device, with or without blocking.
+
+        Args:
+            timeout: Time limit for reading/awaiting bytes, in seconds.
+            minimum: The **minimum** number of bytes to read.
+            maximum: The **maximum** number of bytes to read (``None`` implies
+              infinity). If *buffer* is not ``None``, and:
+
+              - *maximum* is ``None``, the **available** size of the buffer is used
+                instead;
+              - otherwise, *maximum* must not be greater than the **available** size
+                of the buffer.
+
+            no_more: A callable which returns a boolean when passed:
+
+              - the buffer into which bytes are being read (*buffer* itself, if not
+                ``None``),
+              - the index to which the first byte was written, and
+              - the index to which the last byte was written.
+
+              If it returns:
+
+              - ``True``, no more bytes are read and the method returns immediately.
+              - ``False``, more bytes are read.
+
+              The default value always returns ``False``.
+
+            buffer: A pre-allocated buffer to read into.
+            buffer_offset: The index from which to start writing to *buffer*.
+              Ignored if *buffer* is ``None``.
+            echo: Whether or not input should be displayed on the screen, if the device
+              is connected to a terminal emulator. Any input before or after the call
+              is not affected.
+
+        Returns:
+            - The bytes read (empty, if *minimum* == ``0`` (default) and no bytes are
+              read, or *maximum* == ``0``), if *buffer* is ``None``, OR
+            - The number of bytes written to *buffer*, if *buffer* is not ``None``.
+
+        Raises:
+            ValueError: *minimum* or *maximum* is out of range.
+            ValueError: *buffer* is empty or *buffer_offset* is out of range.
+
+        The call blocks until *minimum* bytes have been read, regardless of *timeout*.
+        Then, **up to** ``maximum - minimum`` additional bytes are read:
+
+        - **without blocking** (i.e if readily available), if *timeout* is ``None``
+          (default), OR
+        - until a call to *no_more* returns ``True`` or *timeout* elapses,
+          if *timeout* is not ``None``.
+
+          .. note::
+             - *timeout* elapses while reading *minimum* bytes, and additional
+               bytes are read only if *timeout* hasn't elapsed.
+             - If *timeout* < ``0``, it never elapses.
+             - At this stage, bytes are read one at a time and *no_more* is called
+               after each byte is read.
+
+        Upon return or interruption, the device is **immediately** restored to the
+        state in which it was met.
+
+        IMPORTANT:
+            If *buffer* is not ``None``, it cannot be resized until the call returns.
+        """
+        if minimum < 0:
+            raise arg_value_error_msg("'minimum' is negative", minimum)
+
+        if maximum is not None and minimum > maximum:
+            raise arg_value_error_msg(
+                "'minimum' is greater than 'maximum'",
+                minimum,
+                got_extra=f"{maximum=!r}",
+            )
+
+        if buffer is not None:
+            # Dissalows resize of the buffer.
+            # The view is automatically released upon return or interruption.
+            buffer_memory = memoryview(buffer)
+
+            if not buffer:
+                raise ValueError("'buffer' is empty")
+
+            if not 0 <= buffer_offset < len(buffer):
+                raise arg_value_error_range(
+                    "buffer_offset", buffer_offset, got_extra=f"{len(buffer)=!r}"
+                )
+
+            available_size = len(buffer) - buffer_offset
+            if maximum is None:
+                if minimum > available_size:
+                    raise arg_value_error_msg(
+                        "'minimum' is greater than the available size of 'buffer'",
+                        minimum,
+                        got_extra=f"{available_size=!r}",
+                    )
+                maximum = available_size
+            elif maximum > available_size:
+                raise arg_value_error_msg(
+                    "'maximum' is greater than the available size of 'buffer'",
+                    maximum,
+                    got_extra=f"{available_size=!r}",
+                )
+
+        if maximum == 0:
+            return 0 if buffer else b""
+
+        if buffer:
+            buffer_supplied = True
+            buffer_index = buffer_offset
+        else:
+            buffer_supplied = False
+            buffer_index = buffer_offset = 0
+            buffer = bytearray()
+
+        if maximum:
+            buffer_end = buffer_offset + maximum
+
+        tty_fd = self.fileno()
+        old_attr = termios.tcgetattr(tty_fd)
+        new_attr = termios.tcgetattr(tty_fd)
+
+        new_attr[3] &= ~termios.ICANON  # Disable canonical mode
+        if echo:
+            new_attr[3] |= termios.ECHO  # Enable input echo
+        else:
+            new_attr[3] &= ~termios.ECHO  # Disable input echo
+        new_attr[6][termios.VTIME] = 0  # Never block based on time
+        # Block until *minimum* bytes have been read
+        new_attr[6][termios.VMIN] = minimum
+
+        try:
+            w: list[int]
+            x: list[int]
+            r, w, x = [tty_fd], [], []
+            termios.tcsetattr(tty_fd, termios.TCSANOW, new_attr)
+
+            if timeout is None:
+                if minimum:
+                    bytes_read = os.read(tty_fd, maximum or 512)
+                    buffer_index += (n_bytes := len(bytes_read))
+                    buffer[buffer_index - n_bytes : buffer_index] = bytes_read
+
+                    # Don't block based on based on amount of bytes any longer
+                    new_attr[6][termios.VMIN] = 0
+                    termios.tcsetattr(tty_fd, termios.TCSANOW, new_attr)
+
+                maximum_remainder = buffer_end - buffer_index if maximum else 512
+                while maximum_remainder and select(r, w, x, 0.0)[0]:
+                    if bytes_read := os.read(tty_fd, maximum_remainder):
+                        buffer_index += (n_bytes := len(bytes_read))
+                        buffer[buffer_index - n_bytes : buffer_index] = bytes_read
+                        if maximum:
+                            maximum_remainder = buffer_end - buffer_index
+            else:
+                timeout = float(timeout)
+                start = monotonic()
+
+                if minimum:
+                    bytes_read = os.read(tty_fd, minimum)
+                    buffer_index += minimum
+                    buffer[buffer_index - minimum : buffer_index] = bytes_read
+
+                    # Don't block based on based on amount of bytes any longer
+                    new_attr[6][termios.VMIN] = 0
+                    termios.tcsetattr(tty_fd, termios.TCSANOW, new_attr)
+                else:
+                    bytes_read = b""
+
+                if not (infinite := timeout < 0.0):
+                    duration = monotonic() - start
+
+                while (infinite or duration < timeout) and (
+                    # If zero bytes were read in the previous iteration (for whatever
+                    # reason), we are sure the maximum hasn't been reached and
+                    # `no_more()` still returns `False`.
+                    not bytes_read
+                    or (
+                        (not maximum or buffer_index < buffer_end)
+                        and not no_more(buffer, buffer_offset, buffer_index - 1)
+                    )
+                ):
+                    if (
+                        select(r, w, x, None if infinite else timeout - duration)[0]
+                        and (bytes_read := os.read(tty_fd, 1))  # fmt: skip
+                    ):
+                        buffer_index += 1
+                        buffer[buffer_index - 1 : buffer_index] = bytes_read
+
+                    if not infinite:
+                        duration = monotonic() - start
+        finally:
+            if buffer_supplied:
+                buffer_memory.release()
+            termios.tcsetattr(tty_fd, termios.TCSANOW, old_attr)
+
+        return buffer_index - buffer_offset if buffer_supplied else bytes(buffer)
 
 
 # Non-decorator Functions
