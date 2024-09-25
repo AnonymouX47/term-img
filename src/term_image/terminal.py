@@ -23,7 +23,7 @@ from threading import RLock
 from time import monotonic
 from warnings import warn
 
-from typing_extensions import ClassVar, ParamSpec, TypeVar, overload
+from typing_extensions import Buffer, ClassVar, ParamSpec, TypeVar, overload
 
 from .exceptions import TermImageError, TermImageUserWarning
 from .utils import arg_value_error_msg, arg_value_error_range, no_redecorate
@@ -243,6 +243,51 @@ class TTY(FileIO):
     def __del__(self) -> None:
         del self.lock
         super().__del__()
+
+    def query(
+        self,
+        request: Buffer,
+        timeout: int | float = 0.1,
+        no_more: Callable[[bytearray, int, int], bool] = lambda *_: False,
+    ) -> bytes:
+        """Writes to the device and reads from it afterwards.
+
+        Args:
+            request: The bytes to be written.
+
+        Returns:
+            The bytes read after writing *request* (empty, if no bytes were read
+            before *timeout* elapsed); the "response".
+
+        See :py:meth:`read_raw` for the descriptions of the remaining parameters.
+
+        IMPORTANT:
+            Some restrictions may be placed on *request* (if mutable) during the call
+            e.g. a `bytearray` cannot be resized.
+
+        ATTENTION:
+            Any unread bytes are discarded before writing *request*. If such bytes
+            might be needed, they can be read using :py:meth:`read_available` before
+            calling this method.
+        """
+        request = memoryview(request)
+
+        tty_fd = self.fileno()
+        old_attr = termios.tcgetattr(tty_fd)
+        new_attr = termios.tcgetattr(tty_fd)
+        new_attr[3] &= ~termios.ECHO  # Disable input echo
+
+        try:
+            termios.tcsetattr(tty_fd, termios.TCSAFLUSH, new_attr)
+
+            bytes_written = 0
+            while bytes_written < request.nbytes:
+                bytes_written += self.write(request[bytes_written:])
+
+            return self.read_raw(timeout, no_more=no_more)
+        finally:
+            request.release()
+            termios.tcsetattr(tty_fd, termios.TCSANOW, old_attr)
 
     def read_available(self) -> bytes:
         """Reads all **available** bytes without blocking.
