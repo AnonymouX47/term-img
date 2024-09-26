@@ -136,18 +136,22 @@ def no_redecorate(decor: Callable[P, T]) -> Callable[P, T]:
 
     Args:
         decor: The decorator to be wrapped.
+
+    Also used to mark decorators for auto documentation.
     """
-    if getattr(decor, "_no_redecorate_", False):
+    if hasattr(decor, "_no_redecorate_wrapped_"):
         return decor
 
     @wraps(decor)
     def no_redecorate_wrapper(*args: P.args, **kwargs: P.kwargs) -> T:
-        if not getattr(args[0], f"_{decor.__name__}_", False):
+        obj: Any = args[0]
+        if not hasattr(obj, f"_{decor.__name__}_wrapped_"):
             obj = decor(*args, **kwargs)
-            setattr(obj, f"_{decor.__name__}_", True)
-        return obj
+            setattr(obj, f"_{decor.__name__}_wrapped_", ...)
 
-    setattr(no_redecorate_wrapper, "_no_redecorate_", True)
+        return obj  # type: ignore[no-any-return]
+
+    setattr(no_redecorate_wrapper, "_no_redecorate_wrapped_", ...)
 
     return no_redecorate_wrapper
 
