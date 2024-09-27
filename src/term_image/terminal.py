@@ -7,15 +7,16 @@ from __future__ import annotations
 __all__ = (
     "ActiveTerminalSyncProcess",
     "TTY",
-    "active_terminal_sync",
     "get_active_terminal",
+    "with_active_terminal_lock",
     "NoActiveTerminalError",
     "NoMultiProcessSyncWarning",
 )
 
 import os
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Generator
+from contextlib import ExitStack, contextmanager
 from functools import wraps
 from io import FileIO
 from multiprocessing import Process, RLock as mp_RLock
@@ -65,40 +66,30 @@ class NoMultiProcessSyncWarning(TermImageUserWarning):
 
 
 @no_redecorate
-def active_terminal_sync(func: Callable[P, T]) -> Callable[P, T]:
+def with_active_terminal_lock(func: Callable[P, T]) -> Callable[P, T]:
     """Synchronizes access to the :term:`active terminal`.
 
-    Args:
-        func: The function to be wrapped.
-
-    When a decorated function is called, a re-entrant lock is acquired by the current
-    process/thread and released after the call, such that any other decorated
-    function called within another process/thread waits until the lock is fully
-    released (i.e has been released as many times as acquired) by the owner
-    process/thread.
+    When a decorated function is called, a re-entrant lock is acquired by the
+    current process/thread and released after the call, such that any other
+    decorated function called within another process/thread waits until the lock
+    is fully released (i.e has been released as many times as acquired) by the
+    owner process/thread.
 
     IMPORTANT:
-        It only works across subprocesses (recursively) started directly or indirectly
-        via :py:class:`~term_image.terminal.ActiveTerminalSyncProcess` (along with their
-        parent processes) and all their threads, provided
+        It only works across subprocesses (recursively) started directly or
+        indirectly via :py:class:`~term_image.terminal.ActiveTerminalSyncProcess`
+        (along with their parent processes) and all their threads, provided
         :py:mod:`multiprocessing.synchronize` is supported on the host platform.
     """
 
     @wraps(func)
-    def active_terminal_access_wrapper(*args: P.args, **kwargs: P.kwargs) -> T:
+    def with_active_terminal_lock_wrapper(*args: P.args, **kwargs: P.kwargs) -> T:
         try:
             tty = get_active_terminal()
         except NoActiveTerminalError:
             return func(*args, **kwargs)
 
-        # If a thread reaches this point while the lock is being changed
-        # (the old lock has been acquired but hasn't been changed), after the lock
-        # has been changed and the former lock is released, the waiting thread will
-        # acquire the old lock making it to be out of sync.
-        # Hence the second expression, which allows such a thread to acquire the new
-        # lock and be in sync.
-        # NB: Multiple expressions are processed as nested with statements.
-        with tty.lock, tty.lock:
+        with tty.lock():
             # _logger.debug(f"{func.__name__} acquired TTY lock", stacklevel=3)
             return func(*args, **kwargs)
 
@@ -106,16 +97,16 @@ def active_terminal_sync(func: Callable[P, T]) -> Callable[P, T]:
         sync_doc = """
 
         IMPORTANT:
-            Synchronized with :py:func:`~term_image.terminal.active_terminal_sync`.
+            Synchronized with :deco:`~term_image.terminal.with_active_terminal_lock`.
         """
 
         last_line = func.__doc__.rpartition("\n")[2]
         indent = " " * (len(last_line) - len(last_line.lstrip()))
-        active_terminal_access_wrapper.__doc__ = func.__doc__.rstrip() + "\n".join(
+        with_active_terminal_lock_wrapper.__doc__ = func.__doc__.rstrip() + "\n".join(
             line.replace(" " * 8, indent, 1) for line in sync_doc.splitlines()
         )
 
-    return active_terminal_access_wrapper
+    return with_active_terminal_lock_wrapper
 
 
 # Non-decorator Classes
@@ -123,23 +114,26 @@ def active_terminal_sync(func: Callable[P, T]) -> Callable[P, T]:
 
 
 class ActiveTerminalSyncProcess(Process):
-    """A process for :term:`active terminal` access synchronization
+    """A process that enables cross-process :term:`active terminal` access
+    synchronization
 
     This is a subclass of :py:class:`multiprocessing.Process` which provides support
-    for synchronizing access to the :term:`active terminal` (via
-    :py:func:`@active_terminal_sync <term_image.terminal.active_terminal_sync>`)
-    across processes (the parent process and all its child processes started via an
+    for synchronizing access to the :term:`active terminal`
+    (via :deco:`~term_image.terminal.with_active_terminal_lock`)
+    across processes (a parent process and all its child processes started via an
     instance of this class, recursively).
 
     WARNING:
         If :py:mod:`multiprocessing.synchronize` is supported on the host platform
         and a subprocess is started (via an instance of **this class**) within a
-        call to a function decorated with ``@active_terminal_sync``, the thread
+        call to a function decorated with
+        :deco:`~term_image.terminal.with_active_terminal_lock`, the thread
         in which that occurs will be out of sync until the call (to the decorated
         function) returns.
 
         In short, avoid starting a subprocess (via an instance of **this class**)
-        within a function decorated with ``@active_terminal_sync``.
+        within a function decorated with
+        :deco:`~term_image.terminal.with_active_terminal_lock`.
     """
 
     _tty_sync_attempted: ClassVar[bool] = False
@@ -165,12 +159,12 @@ class ActiveTerminalSyncProcess(Process):
         # starting the process. In such a situation, the owner thread will be partially
         # (may acquire the new lock in a nested call while still holding the old lock)
         # out of sync until it has fully released the old lock.
-        with tty.lock:
+        with tty._lock:
             self._tty_name = tty.name
 
             if not ActiveTerminalSyncProcess._tty_sync_attempted:
                 try:
-                    self._tty_lock = tty.lock = mp_RLock()  # type: ignore[assignment]
+                    self._tty_lock = tty._lock = mp_RLock()  # type: ignore[assignment]
                 except ImportError:
                     warn(
                         "Multi-process synchronization is not supported on this "
@@ -186,7 +180,7 @@ class ActiveTerminalSyncProcess(Process):
                     ActiveTerminalSyncProcess._tty_synced = True
                 ActiveTerminalSyncProcess._tty_sync_attempted = True
             elif ActiveTerminalSyncProcess._tty_synced:
-                self._tty_lock = tty.lock
+                self._tty_lock = tty._lock
 
         super().start()
 
@@ -200,7 +194,7 @@ class ActiveTerminalSyncProcess(Process):
             _tty_determined = True
 
             if self._tty_lock:
-                _tty.lock = self._tty_lock
+                _tty._lock = self._tty_lock
                 ActiveTerminalSyncProcess._tty_synced = True
 
             ActiveTerminalSyncProcess._tty_sync_attempted = True
@@ -221,7 +215,7 @@ class TTY(FileIO):
     See :py:class:`io.FileIO` for further description.
     """
 
-    lock: RLock
+    _lock: RLock
 
     def __init__(
         self,
@@ -238,11 +232,47 @@ class TTY(FileIO):
                 "'fd_or_name' is not [connected to] a TTY[-like] device", fd_or_name
             )
 
-        self.lock = RLock()
+        self._lock = RLock()
 
     def __del__(self) -> None:
-        del self.lock
+        del self._lock
         super().__del__()
+
+    @contextmanager
+    def lock(self) -> Generator[None]:
+        """Helps to synchronize access to the device.
+
+        Returns:
+            A context manager which, upon context entry, acquires a re-entrant lock
+            unique to the instance and releases it upon exit.
+
+        :rtype: contextlib.ContextDecorator
+
+        TIP:
+            The return value also doubles as a function decorator, as in::
+
+                @tty.lock()
+                def function():
+                    ...
+
+            in which case the lock is acquired whenever ``function()`` is called,
+            and relased upon return.
+        """
+        with ExitStack() as context_stack:
+            # For the **active terminal**...
+            #
+            # If a thread reaches this point while the lock is being changed
+            # (the old lock has been acquired but hasn't been changed, in another
+            # thread), after the lock has been changed and the old lock is released,
+            # the waiting thread will acquire the old lock making it to be out of sync.
+            context_stack.enter_context(self._lock)
+
+            if self is _tty:
+                # Hence, this second expression, which allows such a thread to
+                # acquire the new lock and be in sync.
+                context_stack.enter_context(self._lock)
+
+            yield
 
     def query(
         self,
