@@ -9,7 +9,9 @@ __all__ = (
     "TTY",
     "get_active_terminal",
     "with_active_terminal_lock",
+    "TerminalError",
     "NoActiveTerminalError",
+    "TTYError",
     "NoMultiProcessSyncWarning",
 )
 
@@ -51,8 +53,18 @@ T = TypeVar("T")
 # ======================================================================================
 
 
-class NoActiveTerminalError(TermImageError):
+class TerminalError(TermImageError):
+    """Base exception class for errors specific to :py:mod:`Terminal Utilities
+    <term_image.terminal>`.
+    """
+
+
+class NoActiveTerminalError(TerminalError):
     """Raised when there is no :term:`active terminal`."""
+
+
+class TTYError(TerminalError):
+    """Raised for errors specific to :py:class:`~term_image.terminal.TTY`."""
 
 
 class NoMultiProcessSyncWarning(TermImageUserWarning):
@@ -587,7 +599,7 @@ def get_active_terminal() -> TTY:
         The :py:class:`TTY` instance associated with the active terminal.
 
     Raises:
-        NoActiveTerminalError: On non-unix-like platforms or when the process does
+        NoActiveTerminalError: On an unsupported platform or the process does
           not seem to be connected to a TTY[-like] device.
     """
     global _tty, _tty_determined
