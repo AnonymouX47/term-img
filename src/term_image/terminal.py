@@ -5,7 +5,10 @@
 from __future__ import annotations
 
 __all__ = (
+    "TERMINAL_INFO",
     "ActiveTerminalSyncProcess",
+    "ReadOnlyTerminalInfo",
+    "TerminalInfo",
     "TTY",
     "TTYSize",
     "get_active_terminal",
@@ -21,16 +24,30 @@ import sys
 from array import array
 from collections.abc import Callable, Generator
 from contextlib import ExitStack, contextmanager
-from functools import wraps
+from dataclasses import dataclass
+from functools import lru_cache, wraps
 from io import FileIO
 from multiprocessing import Process, RLock as mp_RLock
 from threading import RLock
 from time import monotonic
 from warnings import warn
 
-from typing_extensions import Buffer, ClassVar, NamedTuple, ParamSpec, TypeVar, overload
+from typing_extensions import (
+    Any,
+    Buffer,
+    ClassVar,
+    Final,
+    Literal,
+    NamedTuple,
+    ParamSpec,
+    Self,
+    TypeVar,
+    overload,
+)
 
+from .color import Color
 from .exceptions import TermImageError, TermImageUserWarning
+from .geometry import Size
 from .utils import arg_value_error_msg, arg_value_error_range, no_redecorate
 
 OS_IS_UNIX: bool
@@ -214,6 +231,86 @@ class ActiveTerminalSyncProcess(Process):
             ActiveTerminalSyncProcess._tty_sync_attempted = True
 
         return super().run()
+
+
+class _ReadOnlyTerminalInfo(NamedTuple):
+    """See ``ReadOnlyTerminalInfo``.
+
+    This exists just to avoid auto-documentation of the fields since ``TerminalInfo``
+    already does that.
+    """
+
+    bg_color: Color
+    cell_size: Size
+    fg_color: Color
+    graphics: frozenset[Literal["iterm", "kitty"]]
+    name: str
+    term: str
+    version: str
+
+
+class ReadOnlyTerminalInfo(_ReadOnlyTerminalInfo):
+    """Read-only terminal environment description
+
+    Has the same fields as :py:class:`TerminalInfo` but they can't be modified.
+    """
+
+
+@dataclass
+class TerminalInfo:
+    """Terminal environment description"""
+
+    bg_color: Color = Color(0, 0, 0)
+    """The terminal's default background color"""
+
+    cell_size: Size = Size(8, 16)
+    """The pixel size of a character cell on the terminal screen"""
+
+    fg_color: Color = Color(255, 255, 255)
+    """The terminal's default foreground color"""
+
+    graphics: frozenset[Literal["iterm", "kitty"]] = frozenset()
+    """Supported terminal graphics protocols"""
+
+    name: str = ""
+    """The name of the terminal"""
+
+    term: str = os.environ.get("TERM", "")
+    """The terminal's ``terminfo`` entry name
+
+    NOTE:
+        The default value is the value of the ``TERM`` environment variable.
+
+    :meta hide-value:
+    """
+
+    version: str = ""
+    """The version of the terminal"""
+
+    def __delattr__(self, attr: str) -> None:
+        raise AttributeError("Cannot delete field")
+
+    def update(self, terminal_info: Self) -> None:
+        """Updates the description in-place with values from another instance.
+
+        Args:
+            terminal_info: A terminal environment description.
+        """
+        if terminal_info is not self:
+            self.__dict__.update(terminal_info.__dict__)
+
+    def to_read_only(self) -> ReadOnlyTerminalInfo:
+        """Converts the description to a read-only copy.
+
+        Returns:
+            A read-only copy of the terminal environment description.
+        """
+        return self._to_read_only(tuple(self.__dict__.values()))
+
+    @staticmethod
+    @lru_cache()
+    def _to_read_only(field_values: tuple[Any]) -> ReadOnlyTerminalInfo:
+        return tuple.__new__(ReadOnlyTerminalInfo, field_values)
 
 
 class TTY(FileIO):
@@ -675,6 +772,20 @@ def get_active_terminal() -> TTY:
 # Variables
 # ======================================================================================
 
+TERMINAL_INFO: Final[TerminalInfo] = TerminalInfo()
+"""Global terminal environment description
+
+This is used by various aspects of this library to detect feature support and provide
+terminal-/environment-specific functionality. Its fields are initialized with the
+default values.
+
+IMPORTANT:
+    This variable should not be overridden but the instance can be modified
+    either by assigning values to its fields individually or via its
+    :meth:`~term_image.terminal.TerminalInfo.update` method.
+
+:meta hide-value:
+"""
 
 _tty: TTY | None = None
 _tty_determined: bool = False
