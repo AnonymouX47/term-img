@@ -27,5 +27,6 @@ API Reference
    padding
    renderable
    render
+   terminal
    utils
    widget
