@@ -45,10 +45,10 @@ from typing_extensions import (
     overload,
 )
 
-from .color import Color
-from .exceptions import TermImageError, TermImageUserWarning
-from .geometry import Size
-from .utils import arg_value_error_msg, arg_value_error_range, no_redecorate
+from ..color import Color
+from ..exceptions import TermImageError, TermImageUserWarning
+from ..geometry import Size
+from ..utils import arg_value_error_msg, arg_value_error_range, no_redecorate
 
 OS_IS_UNIX: bool
 try:
