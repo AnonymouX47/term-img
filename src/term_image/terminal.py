@@ -7,6 +7,7 @@ from __future__ import annotations
 __all__ = (
     "ActiveTerminalSyncProcess",
     "TTY",
+    "TTYSize",
     "get_active_terminal",
     "with_active_terminal_lock",
     "TerminalError",
@@ -17,6 +18,7 @@ __all__ = (
 
 import os
 import sys
+from array import array
 from collections.abc import Callable, Generator
 from contextlib import ExitStack, contextmanager
 from functools import wraps
@@ -26,15 +28,15 @@ from threading import RLock
 from time import monotonic
 from warnings import warn
 
-from typing_extensions import Buffer, ClassVar, ParamSpec, TypeVar, overload
+from typing_extensions import Buffer, ClassVar, NamedTuple, ParamSpec, TypeVar, overload
 
 from .exceptions import TermImageError, TermImageUserWarning
 from .utils import arg_value_error_msg, arg_value_error_range, no_redecorate
 
 OS_IS_UNIX: bool
 try:
-    import fcntl  # noqa: F401
     import termios
+    from fcntl import ioctl
     from select import select
 except ImportError:
     OS_IS_UNIX = False
@@ -249,6 +251,23 @@ class TTY(FileIO):
     def __del__(self) -> None:
         del self._lock
         super().__del__()
+
+    def get_size(self) -> TTYSize:
+        """Retrieves the TTY size.
+
+        Returns:
+            The current TTY size.
+
+        Raises:
+            TTYError: Unable to retrieve the TTY size.
+        """
+        winsize = array("H", [0, 0, 0, 0])
+        try:
+            ioctl(self.fileno(), termios.TIOCGWINSZ, winsize)
+        except OSError as exc:
+            raise TTYError("Unable to retrieve the TTY size") from exc
+
+        return tuple.__new__(TTYSize, (winsize[1], winsize[0], *winsize[2:]))
 
     @contextmanager
     def lock(self) -> Generator[None]:
@@ -586,6 +605,21 @@ class TTY(FileIO):
             termios.tcsetattr(tty_fd, termios.TCSANOW, old_attr)
 
         return buffer_index - buffer_offset if buffer_supplied else bytes(buffer)
+
+
+class TTYSize(NamedTuple):
+    """TTY size"""
+
+    columns: int
+    rows: int
+    width: int
+    height: int
+
+
+TTYSize.columns.__doc__ = """TTY screen column count"""
+TTYSize.rows.__doc__ = """TTY screen row count"""
+TTYSize.width.__doc__ = """TTY screen width in pixels"""
+TTYSize.height.__doc__ = """TTY screen height in pixels"""
 
 
 # Non-decorator Functions
