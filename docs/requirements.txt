@@ -1,6 +1,6 @@
 furo==2024.8.6
 sphinx==8.0.2;python_version>="3.9"
 sphinx==7.1.2;python_version<"3.9"
-sphinx-toolbox==3.8.0
+sphinx-toolbox==3.8.1
 sphinxcontrib-prettyspecialmethods==0.1.0
 urwid==2.6.15
