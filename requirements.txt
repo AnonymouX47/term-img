@@ -1,5 +1,5 @@
 coverage[toml]==7.6.1
-black==24.8.0
+black==24.10.0
 flake8==7.1.1;python_version>="3.8.1"
 flake8==5.0.4;python_version<"3.8.1"
 isort[colors]==5.13.2
